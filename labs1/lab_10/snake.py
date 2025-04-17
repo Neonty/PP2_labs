@@ -1,231 +1,240 @@
-import pygame, sys
-import random, psycopg2
-import time as t
+import pygame
+import sys
+import random
+import psycopg2
+from psycopg2 import sql
+
+# Database connection
+try:
+    conn = psycopg2.connect(
+        dbname="snake",
+        user="postgres",
+        password="123456789",
+        host="localhost",
+        client_encoding='UTF8'
+    )
+    cur = conn.cursor()
+except psycopg2.OperationalError as e:
+    print(f"Failed to connect to database: {e}")
+    sys.exit(1)
+
+# Create tables
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS user_progress (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE,
+        current_level INTEGER DEFAULT 1,
+        high_score INTEGER DEFAULT 0,
+        last_played TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
+conn.commit()
+
+# Game setup
 pygame.init()
-
-conn, cur = None, None
-
-
-con = psycopg2.connect(
-   host="localhost",
-   dbname="mydatabase",
-   user="postgres",
-   password="123456789"
-)
-cur = con.cursor()
-
-
-cur.execute(
-   '''CREATE TABLE IF NOT EXISTS usertable(
-   username varchar(100),
-   user_score int,
-   user_level int
-   )'''
-)
-con.commit()
-
-W = 600
-sec = 0
-blocksize = 25
-screen = pygame.display.set_mode((W, W))
-caption = pygame.display.set_caption('Snake')
+WIDTH, HEIGHT = 800, 700
+BLOCK_SIZE = 50
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
 clock = pygame.time.Clock()
-fps = 12
-lev = 0
-SCORE = 0
-LEVEL = 0
-running = True
-level_font = pygame.font.SysFont("Verdana", 30)
-score_font = pygame.font.SysFont("Verdana", 30)
-pause = False
+font = pygame.font.SysFont("Arial", 20)
 
-
-time_event = pygame.USEREVENT
-pygame.time.set_timer(time_event, 1000)
-
-
-def insertname(username):
-   cur.execute(
-      "INSERT INTO usertable VALUES('{}', 0, 0)".format(username)
-   )
-   con.commit()
-
-def upd(user):
-   cur.execute(
-      "SELECT * FROM usertable WHERE username = '{}'".format(user)
-   )
-   row = cur.fetchone()
-   cur.execute(
-      "UPDATE usertable SET user_score = '{}', user_level = '{}' WHERE username = '{}'".format 
-      (max(row[1], SCORE), max(row[2], LEVEL), user)
-   )
-   con.commit()
-
-print("Enter your name")
-username = input()
-cur.execute("SELECT count(*) FROM usertable WHERE username='{}'".format(username))
-con.commit()
-if cur.fetchone()[0] == 0:
-   insertname(username)
-   con.commit()
-else:
-      cur.execute("SELECT * FROM usertable WHERE username = '{}'".format(username))
-      data=cur.fetchone()
-      print("User's max score:{}".format(data[1]))
-      print("User's max level:{}".format(data[2]))
-
-
-class GoldApple:
-   def __init__(self):
-      self.x = int(random.randint(0, W)/ blocksize) * blocksize
-      self.y = int(random.randint(0, W)/ blocksize) * blocksize
-      self.rect = pygame.Rect(self.x, self.y, blocksize, blocksize)
-   def update(self):
-      pygame.draw.rect(screen, 'yellow', self.rect)
-
-class Apple:
-   def __init__(self):
-      self.x = int(random.randint(0, W)/ blocksize) * blocksize
-      self.y = int(random.randint(0, W)/ blocksize) * blocksize
-      self.rect = pygame.Rect(self.x, self.y, blocksize, blocksize)
-   
-   def update(self):
-      pygame.draw.rect(screen, 'red', self.rect)
-
+LEVELS = {
+    1: {"speed": 5, "walls": []},
+    2: {"speed": 7, "walls": [pygame.Rect(200, 200, 400, 50)]},
+    3: {"speed": 9, "walls": [pygame.Rect(200, 200, 400, 50), pygame.Rect(100, 150, 50, 400)]},
+    4: {"speed": 11, "walls": [pygame.Rect(200, 200, 400, 50), pygame.Rect(100, 150, 50, 400), pygame.Rect(300, 350, 200, 50)]}
+}
 
 class Snake:
-   def __init__(self):
-      self.x, self.y = blocksize, blocksize
-      self.xdir, self.ydir = 1, 0
-      self.body = [pygame.Rect(self.x, self.y, blocksize, blocksize)]
-      self.head = self.body[0]
-      self.dead = False
-   def update(self):
-      global apple
-      global LEVEL
-      global SCORE
-      global fps
+    def __init__(self):
+        self.reset()
+    
+    def reset(self):
+        self.head = pygame.Rect(100, 100, BLOCK_SIZE, BLOCK_SIZE)
+        self.body = [pygame.Rect(50, 100, BLOCK_SIZE, BLOCK_SIZE)]
+        self.direction = (1, 0)
+    
+    def move(self):
+        self.body.append(pygame.Rect(self.head.x, self.head.y, BLOCK_SIZE, BLOCK_SIZE))
+        self.head.x += self.direction[0] * BLOCK_SIZE
+        self.head.y += self.direction[1] * BLOCK_SIZE
+        self.body.pop(0)
+    
+    def check_collision(self, walls):
+        if (self.head.x < 0 or self.head.x >= WIDTH or 
+            self.head.y < 0 or self.head.y >= HEIGHT):
+            return True
+        for wall in walls:
+            if self.head.colliderect(wall):
+                return True
+        for segment in self.body:
+            if self.head.colliderect(segment):
+                return True
+        return False
 
-      for square in self.body:
-            if self.head.x == square.x and self.head.y == square.y:
-                self.dead = True
-                upd(username)
-            if self.head.x not in range(0, W) or self.head.y not in range(0, W):
-                self.dead = True
-                upd(username)
+class Game:
+    def __init__(self):
+        self.snake = Snake()
+        self.apple = pygame.Rect(300, 300, BLOCK_SIZE, BLOCK_SIZE)
+        self.score = 0
+        self.level = 1
+        self.username = ""
+        self.paused = False
+        self.loaded_level = 1
+    
+    def get_username(self):
+        username = ""
+        while True:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    pygame.quit()
+                    sys.exit()
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_RETURN and username:
+                        return username
+                    elif event.key == pygame.K_BACKSPACE:
+                        username = username[:-1]
+                    else:
+                        username += event.unicode
+            
+            screen.fill((0, 0, 0))
+            text = font.render(f"Enter username: {username}", True, (255, 255, 255))
+            screen.blit(text, (WIDTH//2 - 100, HEIGHT//2))
+            pygame.display.flip()
+    
+    def save_progress(self):
+        try:
+            cur.execute("""
+                INSERT INTO user_progress (username, current_level, high_score)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (username) 
+                DO UPDATE SET 
+                    current_level = EXCLUDED.current_level,
+                    high_score = GREATEST(user_progress.high_score, EXCLUDED.high_score),
+                    last_played = CURRENT_TIMESTAMP
+            """, (self.username, self.level, self.score))
+            conn.commit()
+        except Exception as e:
+            print(f"Error saving progress: {e}")
+    
+    def load_progress(self):
+        try:
+            cur.execute("""
+                SELECT current_level, high_score 
+                FROM user_progress 
+                WHERE username = %s
+            """, (self.username,))
+            result = cur.fetchone()
+            if result:
+                self.loaded_level = result[0]
+                return result[0], result[1]
+        except Exception as e:
+            print(f"Error loading progress: {e}")
+        return 1, 0
+    
+    def game_over(self):
+        self.save_progress()
+        screen.fill((0, 0, 0))
+        game_over_text = font.render("GAME OVER! Press SPACE to continue", True, (255, 255, 255))
+        screen.blit(game_over_text, (WIDTH//2 - 180, HEIGHT//2 - 10))
+        pygame.display.flip()
+        
+        waiting = True
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.save_progress()
+                    pygame.quit()
+                    sys.exit()
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        waiting = False
+        
+        self.snake.reset()
+        self.score = 0
+        self.level = self.loaded_level
+        self.apple.x = random.randint(0, (WIDTH-BLOCK_SIZE)//BLOCK_SIZE) * BLOCK_SIZE
+        self.apple.y = random.randint(0, (HEIGHT-BLOCK_SIZE)//BLOCK_SIZE) * BLOCK_SIZE
+    
+    def run(self):
+        self.username = self.get_username()
+        self.level, high_score = self.load_progress()
+        
+        try:
+            while True:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        self.save_progress()
+                        pygame.quit()
+                        sys.exit()
+                    
+                    if event.type == pygame.KEYDOWN:
+                        if event.key == pygame.K_p:
+                            self.paused = not self.paused
+                            if self.paused:
+                                self.save_progress()
+                        
+                        if not self.paused:
+                            if event.key == pygame.K_UP and self.snake.direction != (0, 1):
+                                self.snake.direction = (0, -1)
+                            elif event.key == pygame.K_DOWN and self.snake.direction != (0, -1):
+                                self.snake.direction = (0, 1)
+                            elif event.key == pygame.K_LEFT and self.snake.direction != (1, 0):
+                                self.snake.direction = (-1, 0)
+                            elif event.key == pygame.K_RIGHT and self.snake.direction != (-1, 0):
+                                self.snake.direction = (1, 0)
+                
+                if self.paused:
+                    continue
+                
+                self.snake.move()
+                
+                if self.snake.check_collision(LEVELS[self.level]["walls"]):
+                    self.game_over()
+                    continue
+                
+                if self.snake.head.colliderect(self.apple):
+                    self.score += 1
+                    self.apple.x = random.randint(0, (WIDTH-BLOCK_SIZE)//BLOCK_SIZE) * BLOCK_SIZE
+                    self.apple.y = random.randint(0, (HEIGHT-BLOCK_SIZE)//BLOCK_SIZE) * BLOCK_SIZE
+                    self.snake.body.append(pygame.Rect(
+                        self.snake.body[-1].x, 
+                        self.snake.body[-1].y, 
+                        BLOCK_SIZE, 
+                        BLOCK_SIZE
+                    ))
 
-      if self.dead:
-            fps = 12
-            self.x, self.y = blocksize, blocksize
-            self.head = pygame.Rect(self.x, self.y, blocksize, blocksize)
-            self.body = [pygame.Rect(self.x, self.y, blocksize, blocksize)]
-            self.xdir = 1
-            self.ydir = 0
-            self.dead = False
-            apple = Apple()
-            SCORE = 0
-            LEVEL = 0
+                    if self.score % 5 == 0 and self.level < len(LEVELS):
+                        self.level += 1
+                
+                screen.fill((0, 0, 0))
+                
+                for wall in LEVELS[self.level]["walls"]:
+                    pygame.draw.rect(screen, (0, 0, 255), wall)
 
-      self.body.append(self.head)
-      for i in range(len(self.body) - 1):
-         self.body[i].x, self.body[i].y = self.body[i + 1].x, self.body[i + 1].y
-      self.head.x += self.xdir * blocksize
-      self.head.y += self.ydir * blocksize 
-      self.body.remove(self.head)
-flag = True
-
-def drawgrid():
-   for x in range(0, W, blocksize):
-      for y in range(0, W, blocksize):
-         rect = pygame.Rect(x, y, blocksize, blocksize)
-         pygame.draw.rect(screen, (255, 255, 255), rect, 1)
-apple = Apple()
-snake = Snake()
-goldapple = GoldApple()
-
-while running:
-   for event in pygame.event.get():
-      if event.type == time_event:
-         sec += 1
-      if event.type == pygame.QUIT:
-         running = False
-         cur.close()
-         con.close()
-      if event.type == pygame.KEYDOWN:
-         if event.key == pygame.K_UP:
-            snake.xdir, snake.ydir = 0, -1
-         elif event.key == pygame.K_DOWN:
-            snake.xdir, snake.ydir = 0, 1
-         elif event.key == pygame.K_LEFT:
-            snake.xdir, snake.ydir = -1, 0
-         elif event.key == pygame.K_RIGHT:
-            snake.xdir, snake.ydir = 1, 0
-         if event.key == pygame.K_SPACE:
-            upd(username)
-            pause = True
-   while pause:   
-      for event in pygame.event.get():
-         if event.type == pygame.QUIT:
-            cur.close()
-            con.close()
+                pygame.draw.rect(screen, (0, 255, 0), self.snake.head)
+                for segment in self.snake.body:
+                    pygame.draw.rect(screen, (0, 200, 0), segment)
+                
+                pygame.draw.rect(screen, (255, 0, 0), self.apple)
+                
+                score_text = font.render(f"Score: {self.score} (High: {high_score})", True, (255, 255, 255))
+                level_text = font.render(f"Level: {self.level}", True, (255, 255, 255))
+                user_text = font.render(f"Player: {self.username}", True, (255, 255, 255))
+                
+                screen.blit(score_text, (10, 10))
+                screen.blit(level_text, (10, 40))
+                screen.blit(user_text, (WIDTH - 150, 10))
+                
+                pygame.display.flip()
+                clock.tick(LEVELS[self.level]["speed"])
+        
+        except (KeyboardInterrupt, SystemExit):
+            self.save_progress()
+            pygame.quit()
             sys.exit()
-         if event.type == pygame.KEYDOWN and event.key == pygame.K_u:
-            pause = False
-      unpause = level_font.render('Press u to unpause', True, 'white')
-      screen.blit(unpause, unpause.get_rect(center = (W // 2, W // 2)))
-      pygame.display.update()
 
-   if sec > 5:
-      apple = Apple()
-      sec = 0
-
-   snake.update()
-   screen.fill('black')
-   
-   score = score_font.render(f" Your score: {SCORE}", True, (0, 0, 255))
-   screen.blit(score, (0, 0))
-   level = level_font.render(f"Your level: {LEVEL}", True, (0, 0, 255))
-   screen.blit(level, (W - 200, 0))
-   if flag:
-      apple.update()
-   if flag == False:
-      goldapple.update()
-
-   pygame.draw.rect(screen, 'green', snake.head)
-
-   for body in snake.body:
-      pygame.draw.rect(screen, 'green', body)
-
-   if snake.head.x == apple.x and snake.head.y == apple.y:
-      sec = 0
-      snake.body.append(pygame.Rect(body.x, body.y,blocksize, blocksize))
-      rand = int(random.randint(0, 4))
-      if rand == 0:
-         flag = False
-         goldapple = GoldApple()
-      else:
-         flag = True
-         apple = Apple()
-      SCORE += 1
-      if SCORE % 2 == 0:
-         fps += 1
-         LEVEL += 1
-
-   if snake.head.x == goldapple.x and snake.head.y == goldapple.y:
-      sec = 0
-      for i in range(4):
-         snake.body.append(pygame.Rect(body.x, body.y,blocksize, blocksize))
-      SCORE += 4
-      rand = int(random.randint(0, 4))
-      if rand == 0:
-         flag = False
-         goldapple = GoldApple()
-      else:
-         flag = True
-         apple = Apple()
-      
-      fps += 2
-      LEVEL += 2
-
-   clock.tick(fps)
-   pygame.display.update()
+if __name__ == "__main__":
+    game = Game()
+    game.run()
+    conn.close()
